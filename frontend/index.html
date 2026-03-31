@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG 챗봇</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ── 사이드바 ── */
+    #sidebar {
+      width: 280px;
+      background: #fff;
+      border-right: 1px solid #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      gap: 16px;
+    }
+
+    #sidebar h2 { font-size: 16px; color: #333; }
+
+    #upload-area {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 13px;
+      color: #666;
+      transition: border-color 0.2s;
+    }
+    #upload-area:hover { border-color: #4f8ef7; color: #4f8ef7; }
+    #file-input { display: none; }
+
+    #doc-list { flex: 1; overflow-y: auto; }
+    .doc-item {
+      font-size: 12px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: #f5f5f5;
+      margin-bottom: 4px;
+      color: #444;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 4px;
+    }
+    .doc-item .doc-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .doc-item .status { color: #4caf50; white-space: nowrap; }
+    .doc-item .delete-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #ccc;
+      font-size: 14px;
+      padding: 0 2px;
+      line-height: 1;
+      transition: color 0.2s;
+      flex-shrink: 0;
+    }
+    .doc-item .delete-btn:hover { color: #e53935; }
+
+    /* ── 채팅 영역 ── */
+    #chat-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      gap: 16px;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 75%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: #4f8ef7;
+      color: #fff;
+      border-bottom-right-radius: 2px;
+    }
+    .message.assistant {
+      align-self: flex-start;
+      background: #fff;
+      color: #333;
+      border-bottom-left-radius: 2px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .sources {
+      font-size: 11px;
+      color: #888;
+      margin-top: 8px;
+      border-top: 1px solid #eee;
+      padding-top: 6px;
+    }
+
+    /* ── 입력창 ── */
+    #input-area {
+      display: flex;
+      gap: 8px;
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    #message-input {
+      flex: 1;
+      border: none;
+      outline: none;
+      font-size: 14px;
+      padding: 8px;
+      resize: none;
+      font-family: inherit;
+    }
+    #send-btn {
+      background: #4f8ef7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    #send-btn:hover { background: #3a7bd5; }
+    #send-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    .loading { opacity: 0.6; font-style: italic; }
+  </style>
+</head>
+<body>
+
+<!-- 사이드바: 문서 관리 -->
+<div id="sidebar">
+  <h2>문서 관리</h2>
+
+  <div id="upload-area" onclick="document.getElementById('file-input').click()">
+    클릭하여 문서 업로드<br/>
+    <small>(.txt, .md, .pdf)</small>
+  </div>
+  <input type="file" id="file-input" accept=".txt,.md,.pdf" />
+
+  <div id="doc-list"></div>
+</div>
+
+<!-- 채팅 영역 -->
+<div id="chat-area">
+  <div id="messages">
+    <div class="message assistant">
+      안녕하세요! 문서를 업로드하고 질문해주세요.
+    </div>
+  </div>
+
+  <div id="input-area">
+    <textarea
+      id="message-input"
+      placeholder="질문을 입력하세요... (Enter: 전송, Shift+Enter: 줄바꿈)"
+      rows="1"
+    ></textarea>
+    <button id="send-btn" onclick="sendMessage()">전송</button>
+  </div>
+</div>
+
+<script>
+  // 세션 ID: 브라우저당 고유 대화 세션
+  const SESSION_ID = crypto.randomUUID();
+  const API_BASE = "/api/v1";
+
+  // ── 초기화 ──
+  loadDocuments();
+
+  // Enter 키로 전송 (Shift+Enter는 줄바꿈)
+  document.getElementById("message-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // 파일 선택 시 업로드
+  document.getElementById("file-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    await uploadDocument(file);
+    e.target.value = "";  // 같은 파일 재업로드 허용
+  });
+
+  // ── 문서 업로드 ──
+  async function uploadDocument(file) {
+    addDocItem(null, file.name, "업로드 중...");
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch(`${API_BASE}/documents/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.detail || "업로드 실패");
+
+      // 임시 아이템 제거 후 id가 포함된 정식 아이템으로 교체
+      const tmp = document.getElementById(`doc-${file.name}`);
+      if (tmp) tmp.remove();
+      addDocItem(data.document_id, file.name, `${data.chunk_count}청크`);
+      appendMessage("assistant", `"${file.name}" 업로드 완료! ${data.chunk_count}개 청크가 저장되었습니다.`);
+    } catch (err) {
+      updateDocItem(file.name, "실패");
+      appendMessage("assistant", `업로드 오류: ${err.message}`);
+    }
+  }
+
+  // ── 문서 목록 로드 ──
+  async function loadDocuments() {
+    try {
+      const res = await fetch(`${API_BASE}/documents`);
+      const docs = await res.json();
+      const list = document.getElementById("doc-list");
+      list.innerHTML = "";
+      docs.forEach((d) => addDocItem(d.id, d.filename, `${d.chunk_count}청크`));
+    } catch (_) {}
+  }
+
+  function addDocItem(id, name, status) {
+    const list = document.getElementById("doc-list");
+    const item = document.createElement("div");
+    item.className = "doc-item";
+    item.id = `doc-${name}`;
+    item.dataset.docId = id;
+    const deleteBtn = id !== null
+      ? `<button class="delete-btn" title="삭제" onclick="deleteDocument(${id}, '${name}')">✕</button>`
+      : "";
+    item.innerHTML = `
+      <span class="doc-name" title="${name}">${name}</span>
+      <span class="status">${status}</span>
+      ${deleteBtn}
+    `;
+    list.prepend(item);
+  }
+
+  function updateDocItem(name, status) {
+    const item = document.getElementById(`doc-${name}`);
+    if (item) item.querySelector(".status").textContent = status;
+  }
+
+  // ── 문서 삭제 ──
+  async function deleteDocument(id, name) {
+    if (!confirm(`"${name}" 을(를) 삭제하시겠습니까?\nVector DB의 청크 데이터도 함께 삭제됩니다.`)) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/documents/${id}`, { method: "DELETE" });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.detail || "삭제 실패");
+
+      const item = document.getElementById(`doc-${name}`);
+      if (item) item.remove();
+      appendMessage("assistant", `"${name}" 삭제 완료. (${data.deleted_chunks}개 청크 제거)`);
+    } catch (err) {
+      appendMessage("assistant", `삭제 오류: ${err.message}`);
+    }
+  }
+
+  // ── 채팅 전송 ──
+  async function sendMessage() {
+    const input = document.getElementById("message-input");
+    const message = input.value.trim();
+    if (!message) return;
+
+    input.value = "";
+    document.getElementById("send-btn").disabled = true;
+
+    appendMessage("user", message);
+    const loadingEl = appendMessage("assistant", "답변 생성 중...", true);
+
+    try {
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: SESSION_ID }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.detail || "오류 발생");
+
+      // 로딩 메시지를 실제 응답으로 교체
+      let html = escapeHtml(data.answer);
+      if (data.sources?.length) {
+        const srcList = data.sources
+          .map((s) => `${s.filename} (유사도: ${s.score})`)
+          .join(", ");
+        html += `<div class="sources">출처: ${srcList}</div>`;
+      }
+      loadingEl.innerHTML = html;
+      loadingEl.classList.remove("loading");
+    } catch (err) {
+      loadingEl.textContent = `오류: ${err.message}`;
+      loadingEl.classList.remove("loading");
+    } finally {
+      document.getElementById("send-btn").disabled = false;
+      input.focus();
+    }
+  }
+
+  function appendMessage(role, content, isLoading = false) {
+    const messages = document.getElementById("messages");
+    const el = document.createElement("div");
+    el.className = `message ${role}${isLoading ? " loading" : ""}`;
+    el.textContent = content;
+    messages.appendChild(el);
+    messages.scrollTop = messages.scrollHeight;
+    return el;
+  }
+
+  function escapeHtml(text) {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\n/g, "<br/>");
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Data Validation
+pydantic==2.9.0
+pydantic-settings==2.5.2
+
+# Database (RDB)
+sqlalchemy==2.0.35
+aiosqlite==0.20.0
+
+# Vector DB
+chromadb==0.5.15
+
+# AI / Embedding
+huggingface-hub==0.25.1
+sentence-transformers==3.1.1
+
+# HTTP Client (외부 API 호출)
+httpx==0.27.2
+
+# Document Parsing
+pypdf==5.0.1
+python-multipart==0.0.12
+
+# Utility
+python-dotenv==1.0.1
