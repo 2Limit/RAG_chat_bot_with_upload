@@ -195,7 +195,36 @@
   const API_BASE = "/api/v1";
 
   // ── 초기화 ──
-  loadDocuments();
+  let accessToken = "";
+  let conversationEpoch = 0;
+  const login = document.createElement("form");
+  login.style.cssText = "position:fixed;inset:0;background:#fff;z-index:1000;padding:15vh 10vw;color:#111";
+  login.innerHTML = `<h2>문서 보관함 연결</h2><p>관리자에게 받은 개인 접속 토큰을 입력하세요. 토큰은 이 페이지 메모리에만 보관합니다.</p><label>접속 토큰 <input type="password" name="token" required autocomplete="off"></label><button>연결</button><p role="alert"></p>`;
+  document.body.appendChild(login);
+  login.addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = login.querySelector("button");
+    button.disabled = true;
+    accessToken = login.elements.token.value;
+    try {
+      const response = await apiFetch(`${API_BASE}/documents`);
+      if (!response.ok) throw new Error("토큰을 확인해 주세요.");
+      login.remove();
+      const logout = document.createElement("button");
+      logout.textContent = "연결 해제";
+      logout.onclick = () => { accessToken = ""; location.reload(); };
+      document.body.prepend(logout);
+      await loadDocuments();
+    } catch (error) {
+      accessToken = "";
+      login.querySelector('[role="alert"]').textContent = error.message;
+      button.disabled = false;
+    }
+  });
+  function apiFetch(url, options = {}) {
+    if (!accessToken) return Promise.reject(new Error("먼저 연결해 주세요."));
+    return fetch(url, {...options, headers: {...options.headers, Authorization: `Bearer ${accessToken}`}});
+  }
 
   // Enter 키로 전송 (Shift+Enter는 줄바꿈)
   document.getElementById("message-input").addEventListener("keydown", (e) => {
@@ -221,7 +250,7 @@
     formData.append("file", file);
 
     try {
-      const res = await fetch(`${API_BASE}/documents/upload`, {
+      const res = await apiFetch(`${API_BASE}/documents/upload`, {
         method: "POST",
         body: formData,
       });
@@ -230,12 +259,12 @@
       if (!res.ok) throw new Error(data.detail || "업로드 실패");
 
       // 임시 아이템 제거 후 id가 포함된 정식 아이템으로 교체
-      const tmp = document.getElementById(`doc-${file.name}`);
+      const tmp = document.getElementById(`upload-${file.name}`);
       if (tmp) tmp.remove();
       addDocItem(data.document_id, file.name, `${data.chunk_count}청크`);
       appendMessage("assistant", `"${file.name}" 업로드 완료! ${data.chunk_count}개 청크가 저장되었습니다.`);
     } catch (err) {
-      updateDocItem(file.name, "실패");
+      await loadDocuments();
       appendMessage("assistant", `업로드 오류: ${err.message}`);
     }
   }
@@ -243,12 +272,13 @@
   // ── 문서 목록 로드 ──
   async function loadDocuments() {
     try {
-      const res = await fetch(`${API_BASE}/documents`);
+      const res = await apiFetch(`${API_BASE}/documents`);
+      if (!res.ok) throw new Error("목록 조회 실패");
       const docs = await res.json();
       const list = document.getElementById("doc-list");
       list.innerHTML = "";
-      docs.forEach((d) => addDocItem(d.id, d.filename, `${d.chunk_count}청크`));
-    } catch (_) {}
+      docs.forEach((d) => addDocItem(d.id, d.filename, `${d.status}: ${d.chunk_count}청크`));
+    } catch (error) { appendMessage("assistant", error.message); }
   }
 
   function addDocItem(id, name, status) {
@@ -257,37 +287,49 @@
     item.className = "doc-item";
     item.id = `doc-${name}`;
     item.dataset.docId = id;
-    const deleteBtn = id !== null
-      ? `<button class="delete-btn" title="삭제" onclick="deleteDocument(${id}, '${name}')">✕</button>`
-      : "";
-    item.innerHTML = `
-      <span class="doc-name" title="${name}">${name}</span>
-      <span class="status">${status}</span>
-      ${deleteBtn}
-    `;
+    item.id = id === null ? `upload-${name}` : `doc-${id}`;
+    const label = document.createElement("span");
+    label.className = "doc-name";
+    label.title = name;
+    label.textContent = name;
+    const state = document.createElement("span");
+    state.className = "status";
+    state.textContent = status;
+    item.append(label, state);
+    if (id !== null) {
+      const button = document.createElement("button");
+      button.className = "delete-btn";
+      button.title = "삭제";
+      button.textContent = "✕";
+      button.onclick = () => deleteDocument(id, name);
+      item.appendChild(button);
+    }
     list.prepend(item);
   }
 
   function updateDocItem(name, status) {
-    const item = document.getElementById(`doc-${name}`);
+    const item = document.getElementById(`upload-${name}`);
     if (item) item.querySelector(".status").textContent = status;
   }
 
   // ── 문서 삭제 ──
   async function deleteDocument(id, name) {
-    if (!confirm(`"${name}" 을(를) 삭제하시겠습니까?\nVector DB의 청크 데이터도 함께 삭제됩니다.`)) return;
+    if (!confirm(`"${name}" 을(를) 삭제하시겠습니까?\n문서와 벡터가 삭제되며, 삭제 문서의 재인용을 막기 위해 내 모든 대화 기록도 초기화됩니다. 진행 중인 답변은 표시·저장되지 않습니다. 삭제가 일부 실패해도 대화 기록은 복구되지 않습니다.`)) return;
 
+    conversationEpoch += 1;
+    document.getElementById("messages").replaceChildren();
     try {
-      const res = await fetch(`${API_BASE}/documents/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`${API_BASE}/documents/${id}`, { method: "DELETE" });
       const data = await res.json();
 
       if (!res.ok) throw new Error(data.detail || "삭제 실패");
 
-      const item = document.getElementById(`doc-${name}`);
+      const item = document.getElementById(`doc-${id}`);
       if (item) item.remove();
-      appendMessage("assistant", `"${name}" 삭제 완료. (${data.deleted_chunks}개 청크 제거)`);
+      appendMessage("assistant", `"${name}" 삭제 완료. (${data.deleted_chunks}개 청크 제거) 내 대화 기록도 초기화했습니다.`);
     } catch (err) {
-      appendMessage("assistant", `삭제 오류: ${err.message}`);
+      appendMessage("assistant", `삭제 오류: ${err.message} 대화 기록이 이미 초기화됐을 수 있습니다. 문서 목록을 확인하고 삭제를 다시 시도하세요.`);
+      await loadDocuments();
     }
   }
 
@@ -301,10 +343,11 @@
     document.getElementById("send-btn").disabled = true;
 
     appendMessage("user", message);
+    const epoch = conversationEpoch;
     const loadingEl = appendMessage("assistant", "답변 생성 중...", true);
 
     try {
-      const res = await fetch(`${API_BASE}/chat`, {
+      const res = await apiFetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, session_id: SESSION_ID }),
@@ -313,17 +356,19 @@
 
       if (!res.ok) throw new Error(data.detail || "오류 발생");
 
+      if (epoch !== conversationEpoch) return;
       // 로딩 메시지를 실제 응답으로 교체
       let html = escapeHtml(data.answer);
       if (data.sources?.length) {
         const srcList = data.sources
-          .map((s) => `${s.filename} (유사도: ${s.score})`)
+          .map((s) => `${escapeHtml(s.filename)} (유사도: ${s.score})`)
           .join(", ");
         html += `<div class="sources">출처: ${srcList}</div>`;
       }
       loadingEl.innerHTML = html;
       loadingEl.classList.remove("loading");
     } catch (err) {
+      if (epoch !== conversationEpoch) return;
       loadingEl.textContent = `오류: ${err.message}`;
       loadingEl.classList.remove("loading");
     } finally {

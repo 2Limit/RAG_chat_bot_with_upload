@@ -6,7 +6,7 @@ from app.core.config import settings
 # 비동기 DB 엔진 생성
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,  # debug=True 이면 SQL 쿼리 로그 출력
+    echo=False,  # Never log document/chat SQL parameters, even in debug mode
 )
 
 # 세션 팩토리 (요청마다 세션을 하나씩 만들어서 사용)
@@ -26,8 +26,18 @@ async def init_db() -> None:
     """앱 시작 시 테이블 자동 생성"""
     # 모델을 import해야 Base.metadata에 등록됨
     from app.models import chat, document  # noqa: F401
+    from app.core.revisions import OwnerRevision  # noqa: F401
 
     async with engine.begin() as conn:
+        from sqlalchemy import inspect
+        def check_schema(connection):
+            inspector = inspect(connection)
+            for table in ("documents", "chat_sessions"):
+                if table in inspector.get_table_names():
+                    columns = {c["name"] for c in inspector.get_columns(table)}
+                    if "owner_id" not in columns:
+                        raise RuntimeError("Legacy database: use a fresh DB/vector/raw directory; see SECURITY.md")
+        await conn.run_sync(check_schema)
         await conn.run_sync(Base.metadata.create_all)
 
 

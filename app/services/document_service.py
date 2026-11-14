@@ -1,94 +1,118 @@
-import uuid
+import logging
 from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete, update
+from app.core.revisions import OwnerRevision, ensure_revision
+from app.models.chat import ChatSession, ChatMessage
 
 from app.core.config import settings
 from app.models.document import Document
-from app.pipelines.ingestion_pipeline import IngestionPipeline
 from app.schemas.document import DocumentUploadResponse, DocumentListItem, DocumentDeleteResponse
+
+logger = logging.getLogger(__name__)
+
+
+def safe_filename(filename: str) -> str:
+    # Reject rather than silently normalize paths. Display names are never storage keys.
+    if (not filename or len(filename) > 255 or filename in {".", ".."}
+            or any(c in filename for c in '/\\:')
+            or any(ord(c) < 32 or ord(c) == 127 for c in filename)):
+        raise HTTPException(400, "Invalid filename")
+    if Path(filename).suffix.lower() not in {".txt", ".md", ".pdf"}:
+        raise HTTPException(400, "Only txt, md and pdf are supported")
+    return filename
 
 
 class DocumentService:
-    """문서 업로드 처리 및 목록 조회"""
-
-    def __init__(self, ingestion_pipeline: IngestionPipeline):
+    def __init__(self, ingestion_pipeline):
         self.pipeline = ingestion_pipeline
 
-    async def upload(
-        self,
-        filename: str,
-        content: bytes,
-        db: AsyncSession,
-    ) -> DocumentUploadResponse:
-        # 1. 파일 저장
-        save_path = Path("data/raw") / filename
-        save_path.write_bytes(content)
+    def _path(self, doc):
+        root = Path(settings.raw_path).resolve()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / f"{doc.id}{Path(doc.filename).suffix.lower()}"
+        # Storage is service-private. Refuse unexpected symlinks rather than follow them.
+        if path.is_symlink():
+            raise RuntimeError("Unsafe storage path")
+        return path
 
-        # 2. DB에 문서 메타데이터 저장 (status: processing)
-        doc = Document(
-            filename=filename,
-            file_path=str(save_path),
-            status="processing",
-        )
+    async def upload(self, filename: str, content: bytes, db: AsyncSession, owner_id: str):
+        filename = safe_filename(filename)
+        if not content or len(content) > settings.max_upload_bytes:
+            raise HTTPException(413 if content else 400, "Empty or oversized document")
+        doc = Document(owner_id=owner_id, filename=filename, file_path="", status="processing")
         db.add(doc)
         await db.commit()
         await db.refresh(doc)
+        doc_id = doc.id
+        created_file = False
+        ingestion_started = False
+        try:
+            path = self._path(doc)
+            with path.open("xb") as stream:
+                created_file = True
+                stream.write(content)
+            doc.file_path = str(path)
+            await db.commit()
+            ingestion_started = True
+            count = await self.pipeline.run(str(path), filename, owner_id, doc_id)
+            if not count:
+                raise ValueError("No extractable text in document")
+            doc.chunk_count = count
+            doc.status = "completed"
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            # Persist failed before cleanup. Search only sees completed IDs, so even
+            # cleanup failure cannot re-expose partial ingestion. DELETE can retry.
+            doc = await db.get(Document, doc_id)
+            doc.status = "failed"
+            # Empty path means this attempt never owned a file; DELETE must not
+            # remove an unrelated pre-existing path after an exclusive-open error.
+            doc.file_path = str(path) if created_file else ""
+            await db.commit()
+            try:
+                if ingestion_started:
+                    self.pipeline.vector_repository.delete_document(owner_id, doc_id)
+                if created_file:
+                    self._path(doc).unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Document cleanup requires retry: %s", doc_id)
+            raise HTTPException(422, "Document processing failed; delete the failed entry and retry")
+        return DocumentUploadResponse(document_id=doc.id, filename=filename,
+            chunk_count=count, status="completed", message=f"{count} chunks stored")
 
-        # 3. 인제스천 파이프라인 실행 (청킹 → 임베딩 → 벡터 저장)
-        chunk_count = await self.pipeline.run(
-            file_path=str(save_path),
-            filename=filename,
-        )
-
-        # 4. 완료 상태 업데이트
-        doc.chunk_count = chunk_count
-        doc.status = "completed"
-        await db.commit()
-
-        return DocumentUploadResponse(
-            document_id=doc.id,
-            filename=filename,
-            chunk_count=chunk_count,
-            status="completed",
-            message=f"{chunk_count}개 청크가 Vector DB에 저장되었습니다.",
-        )
-
-    async def list_documents(self, db: AsyncSession) -> list[DocumentListItem]:
-        result = await db.execute(
-            select(Document).order_by(Document.created_at.desc())
-        )
-        docs = result.scalars().all()
+    async def list_documents(self, db: AsyncSession, owner_id: str):
+        docs = (await db.scalars(select(Document).where(Document.owner_id == owner_id)
+                               .order_by(Document.created_at.desc()))).all()
         return [DocumentListItem.model_validate(doc) for doc in docs]
 
-    async def delete(self, document_id: int, db: AsyncSession) -> DocumentDeleteResponse:
-        # 1. RDB에서 문서 조회
-        result = await db.execute(
-            select(Document).where(Document.id == document_id)
-        )
-        doc = result.scalar_one_or_none()
+    async def delete(self, document_id: int, db: AsyncSession, owner_id: str):
+        await ensure_revision(db, owner_id)
+        doc = await db.scalar(select(Document).where(Document.id == document_id,
+                                                    Document.owner_id == owner_id))
         if doc is None:
-            raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
-
-        filename = doc.filename
-        deleted_chunks = doc.chunk_count
-
-        # 2. Vector DB에서 해당 파일의 청크 전체 삭제
-        self.pipeline.vector_repository.delete_by_source(filename)
-
-        # 3. 파일 시스템에서 원본 파일 삭제
-        file_path = Path(doc.file_path)
-        if file_path.exists():
-            file_path.unlink()
-
-        # 4. RDB에서 문서 행 삭제
-        await db.delete(doc)
+            raise HTTPException(404, "Document not found")
+        filename, count = doc.filename, doc.chunk_count
+        # Durable tombstone excludes chunks from new retrievals before removing them.
+        await db.execute(update(OwnerRevision).where(OwnerRevision.owner_id == owner_id)
+                         .values(revision=OwnerRevision.revision + 1))
+        doc.status = "deleting"
+        # Past answers may contain the deleted document. Clear this owner's
+        # histories rather than accidentally reuse those excerpts in future chats.
+        sessions = select(ChatSession.session_id).where(ChatSession.owner_id == owner_id)
+        await db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(sessions)))
         await db.commit()
-
-        return DocumentDeleteResponse(
-            message="문서가 삭제되었습니다.",
-            filename=filename,
-            deleted_chunks=deleted_chunks,
-        )
+        try:
+            self.pipeline.vector_repository.delete_document(owner_id, doc.id)
+            if doc.file_path:
+                self._path(doc).unlink(missing_ok=True)
+            await db.delete(doc)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("Document deletion requires retry: %s", document_id)
+            raise HTTPException(503, "Deletion incomplete; your conversation history has already been cleared and in-flight answers invalidated. Retry this document ID.")
+        return DocumentDeleteResponse(message="Document deleted", filename=filename, deleted_chunks=count)
