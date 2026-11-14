@@ -22,3 +22,7 @@ data/chatbot.db
 # OS
 .DS_Store
 Thumbs.db
+
+.pytest_cache/
+data/
+*.db

@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 
@@ -12,6 +11,7 @@ class EmbeddingService:
     """
 
     def __init__(self):
+        from sentence_transformers import SentenceTransformer
         model_name = settings.huggingface_embedding_model
         print(f"[EmbeddingService] 모델 로딩 중: {model_name} (device: cpu)")
         self._model = SentenceTransformer(model_name, device="cpu")

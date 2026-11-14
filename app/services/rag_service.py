@@ -35,6 +35,8 @@ class RAGService:
         self,
         question: str,
         chat_history: list[dict],
+        owner_id: str,
+        document_ids: list[int],
     ) -> tuple[str, list[SourceDocument]]:
         """
         질문에 대한 RAG 기반 답변 생성.
@@ -42,12 +44,15 @@ class RAGService:
         Returns:
             (answer_text, source_documents)
         """
+        if not document_ids:
+            return "제공된 문서에서 해당 내용을 찾을 수 없습니다.", []
         # 1. 질문 임베딩
         query_embedding = await self.embedding_service.embed_text(question)
 
         # 2. Vector DB 유사 문서 검색
         chunks = self.vector_repository.search(
             query_embedding=query_embedding,
+            owner_id=owner_id, document_ids=document_ids,
             top_k=settings.rag_top_k,
             score_threshold=settings.rag_score_threshold,
         )

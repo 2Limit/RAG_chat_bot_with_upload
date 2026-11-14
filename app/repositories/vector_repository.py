@@ -1,5 +1,3 @@
-import chromadb
-from chromadb.config import Settings as ChromaSettings
 
 from app.core.config import settings
 
@@ -11,6 +9,8 @@ class VectorRepository:
     """
 
     def __init__(self):
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
         self._client = chromadb.PersistentClient(
             path=settings.vectordb_path,
             settings=ChromaSettings(anonymized_telemetry=False),
@@ -38,6 +38,8 @@ class VectorRepository:
     def search(
         self,
         query_embedding: list[float],
+        owner_id: str,
+        document_ids: list[int],
         top_k: int = 5,
         score_threshold: float = 0.7,
     ) -> list[dict]:
@@ -45,7 +47,10 @@ class VectorRepository:
         쿼리 임베딩과 가장 유사한 청크를 검색.
         반환: [{ text, metadata, score }, ...]
         """
+        if not document_ids:
+            return []
         results = self._collection.query(
+            where={"$and": [{"owner_id": owner_id}, {"document_id": {"$in": document_ids}}]},
             query_embeddings=[query_embedding],
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
@@ -64,9 +69,9 @@ class VectorRepository:
 
         return chunks
 
-    def delete_by_source(self, filename: str) -> None:
+    def delete_document(self, owner_id: str, document_id: int) -> None:
         """특정 파일의 모든 청크 삭제 (문서 재업로드 시 사용)"""
-        self._collection.delete(where={"source": filename})
+        self._collection.delete(where={"$and": [{"owner_id": owner_id}, {"document_id": document_id}]})
 
     def count(self) -> int:
         return self._collection.count()

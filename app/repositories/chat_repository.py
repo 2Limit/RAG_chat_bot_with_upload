@@ -10,14 +10,14 @@ class ChatRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def get_or_create_session(self, session_id: str) -> ChatSession:
+    async def get_or_create_session(self, session_id: str, owner_id: str) -> ChatSession:
         result = await self.db.execute(
             select(ChatSession).where(ChatSession.session_id == session_id)
         )
         session = result.scalar_one_or_none()
 
         if session is None:
-            session = ChatSession(session_id=session_id)
+            session = ChatSession(session_id=session_id, owner_id=owner_id)
             self.db.add(session)
             await self.db.commit()
             await self.db.refresh(session)

@@ -34,7 +34,7 @@
 - **💬 RAG 기반 답변** — 업로드된 문서에서 관련 내용을 검색 후 LLM으로 답변 생성
 - **🗂️ 출처 표시** — 응답마다 참조한 파일명과 유사도 점수 표시
 - **🔁 멀티턴 대화** — 최근 3턴의 대화 히스토리를 컨텍스트로 유지
-- **🗑️ 문서 삭제** — RDB, Vector DB, 파일 시스템에서 동시 삭제
+- **🗑️ 문서 삭제** — 상태 차단 후 Vector DB·파일·RDB 순서로 정리, 실패 시 재시도. 삭제한 문서의 재인용 방지를 위해 해당 사용자의 대화 기록도 초기화
 - **🌐 반응형 웹 UI** — 별도 설치 없이 브라우저에서 바로 사용
 
 ---
@@ -106,6 +106,9 @@
 
 ## 🚀 설치 및 실행 방법
 
+**먼저 [보안 설정·마이그레이션 안내](SECURITY.md)를 읽으세요.** 개인 접속 토큰 설정이 필수이며, 기존 DB는 자동 이전되지 않습니다. 새 설치는 `python scripts/setup_local.py`로 `.env`와 개인 토큰을 준비한 뒤 모델 API 키를 설정합니다. 아래 `.env` 복사 예시는 수동 설정 시에만 사용하며 AUTH_TOKEN_HASHES도 채워야 합니다.
+
+
 ### 사전 요구사항
 
 - Python 3.11 이상
@@ -115,7 +118,7 @@
 ### 1. 저장소 클론
 
 ```bash
-git clone https://github.com/{your-username}/RAG_chat_bot_with_upload.git
+git clone https://github.com/2Limit/RAG_chat_bot_with_upload.git
 cd RAG_chat_bot_with_upload
 ```
 
@@ -273,7 +276,7 @@ ChromaDB는 `None` 타입 메타데이터를 허용하지 않습니다 (`str`, `
 - [ ] **응답 캐싱** — 동일 질문에 대한 Redis 캐시로 API 비용 절감
 - [ ] **PDF 고급 파싱** — Upstage Document Parse API 연동으로 표/이미지 처리
 - [ ] **PostgreSQL 마이그레이션** — 다중 사용자 환경 대응
-- [ ] **사용자 인증** — 세션별 문서 격리
+- [x] **개인 토큰 인증** — 사용자별 문서·검색·대화 격리 (소규모 설치용, SSO/MFA는 미구현)
 - [ ] **RAG 평가 지표** — RAGAS 프레임워크로 Precision@K, 응답 관련성 측정
 
 ---

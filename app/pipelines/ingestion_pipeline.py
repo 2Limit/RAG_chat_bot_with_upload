@@ -21,7 +21,7 @@ class IngestionPipeline:
         self.embedding_service = embedding_service
         self.vector_repository = vector_repository
 
-    async def run(self, file_path: str, filename: str) -> int:
+    async def run(self, file_path: str, filename: str, owner_id: str, document_id: int) -> int:
         """
         파이프라인 실행.
         Returns:
@@ -29,6 +29,9 @@ class IngestionPipeline:
         """
         # 1. 문서 파싱 — (텍스트, 페이지번호) 쌍 목록 반환
         pages = self._parse(file_path)  # [(text, page_no), ...]
+
+        if sum(len(text) for text, _ in pages) > settings.max_document_chars:
+            raise ValueError("Document text exceeds limit")
 
         # 2. 텍스트 정제 + 청킹 (페이지별로 처리 후 합산)
         all_chunks: list[str] = []
@@ -59,10 +62,10 @@ class IngestionPipeline:
         # 4. 메타데이터 구성 및 Vector DB 저장
         # ChromaDB 제약: 메타데이터 값은 str/int/float/bool 만 허용 (None 불가)
         metadatas = [
-            {"source": filename, "chunk_index": i, "page": all_page_nos[i]}
+            {"owner_id": owner_id, "document_id": document_id, "source": filename, "chunk_index": i, "page": all_page_nos[i]}
             for i in range(len(chunks))
         ]
-        ids = [f"{filename}_{i}_{uuid.uuid4().hex[:8]}" for i in range(len(chunks))]
+        ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
         self.vector_repository.add_chunks(
             chunks=chunks,
@@ -90,6 +93,8 @@ class IngestionPipeline:
             try:
                 import pypdf
                 reader = pypdf.PdfReader(file_path)
+                if len(reader.pages) > settings.max_pdf_pages:
+                    raise ValueError("PDF page limit exceeded")
                 return [
                     (page.extract_text() or "", page_no + 1)
                     for page_no, page in enumerate(reader.pages)

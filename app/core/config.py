@@ -5,7 +5,12 @@ class Settings(BaseSettings):
     # App
     app_name: str = "RAG Chatbot"
     app_version: str = "0.1.0"
-    debug: bool = True
+    debug: bool = False
+    auth_token_hashes: dict[str, str] = {}
+    raw_path: str = "./data/raw"
+    max_upload_bytes: int = 10 * 1024 * 1024
+    max_document_chars: int = 1_000_000
+    max_pdf_pages: int = 200
 
     # Upstage
     upstage_api_key: str = ""
